@@ -9,9 +9,12 @@ References:
     [1] Willems, S. (2020). SABR smiles for RFR caplets
     [2] Hagan, P. S., Kumar, D., Lesniewski, A. S., & Woodward, D. E. (2002). Managing smile risk.
 """
+import time
+from datetime import date
 import numpy as np
 from scipy.stats import norm
 from scipy.optimize import bisect, differential_evolution
+from discount_curve import Curve
 
 
 class Caplet:
@@ -45,7 +48,8 @@ class Caplet:
 class MarketCaplet(Caplet):
     """
     A class that holds the necessary information for a OIA caplet/floorlet that
-    we observe in the market, it holds the contract details but additionally a market price
+    we observe in the market, it holds the contract details but additionally
+    a market price or market volatility
     """
 
     def __init__(
@@ -57,12 +61,14 @@ class MarketCaplet(Caplet):
         direction: str,
         call_put: str,
         price: float,
+        vol: float,
     ):
         super().__init__(start, end, init_fwd, strike, direction, call_put)
         self.price = price
+        self.vol = vol
 
 
-class SabrModelOIA:
+class SabrModel:
     """
     A class that implements the SABR model for pricing caplets on overnight index averages.
     Notation is taken from [1].
@@ -308,13 +314,29 @@ class SabrModelOIA:
         return self._black_formula(black_vol)
 
     def market_option_premium(self, market_caplet: MarketCaplet):
-        """ """
+        """
+        Function that determines the option premium of market_caplet
+        based on the current set of SABR parameters.
+        """
         self._set_market_caplet_as_inner_caplet(market_caplet)
         self._eff_parameters()
         return self.option_premium()
 
+    def market_black_equiv_vol(self, market_caplet: MarketCaplet):
+        """
+        Function that determines the Black model equivalent volatility of market_caplet
+        based on the current set of SABR parameters.
+        """
+        self._set_market_caplet_as_inner_caplet(market_caplet)
+        self._eff_parameters()
+        return self.black_equiv_vol()
+
     def _set_market_caplet_as_inner_caplet(self, market_caplet: MarketCaplet):
-        """ """
+        """
+        Function that sets market_caplet as self.caplet, makes it possible to compute
+        the option premium or black equivalent volatility of market_caplet for a particular
+        set of SABR parameters.
+        """
         self.caplet.start = market_caplet.start
         self.caplet.end = market_caplet.end
         self.caplet.init_fwd = market_caplet.init_fwd
@@ -323,40 +345,64 @@ class SabrModelOIA:
         self.caplet.call_put = market_caplet.call_put
 
     def black_implied_vol(self, price):
-        def f(volatility):
+        """
+        Compute the Black model implied volatility based on the price of the option
+        using the bisection root finding method.
+        """
+
+        def objective_function(volatility):
             return self._black_formula(volatility) - price
 
-        return bisect(f, 0.001, 1)
+        return bisect(objective_function, 0.0001, 1)
 
-    def market_calibration(self, market_caplets, disp=False):
+    def market_calibration(self, market_caplets, disp=False, objective="price"):
         """
-        market_caplets should be list of MarketCaplet's
+        Calibrate the SABR model parameters to market caplets using differential evolution.
         """
         market_prices = np.array(
             [market_caplet.price for market_caplet in market_caplets]
         )
+        market_vols = np.array([market_caplet.vol for market_caplet in market_caplets])
 
-        def objective_function(x, market_caplets, market_prices):
-            self.alpha, self.beta, self.rho, self.volvol = x[0], x[1], x[2], x[3]
-            model_prices = np.array(
+        def objective_function(sabr, market_caplets, market_prices):
+            self.alpha, self.beta, self.rho, self.volvol = (
+                sabr[0],
+                sabr[1],
+                sabr[2],
+                sabr[3],
+            )
+            if objective == "price":
+                model_prices = np.array(
+                    [
+                        self.market_option_premium(market_caplet)
+                        for market_caplet in market_caplets
+                    ]
+                )
+                return np.sum(np.abs(model_prices - market_prices))
+            model_vols = np.array(
                 [
-                    self.market_option_premium(market_caplet)
+                    self.market_black_equiv_vol(market_caplet)
                     for market_caplet in market_caplets
                 ]
             )
-            return np.sum(np.abs(model_prices - market_prices))
+            return np.sum(np.abs(model_vols - market_vols))
 
+        start_time = time.time()
         result = differential_evolution(
             objective_function,
-            bounds=[(0.0001, 1), (0.0001, 1), (-0.9999, 1), (0.0001, 1)],
+            bounds=[(0.0001, 1), (0.0001, 1), (-1, 1), (0.0001, 1)],
             args=(market_caplets, market_prices),
             disp=disp,
         )
-        print(f"Differential Evolution: {result.fun}")
+        elapsed_time = time.time() - start_time
+
+        assert result.success, "Differential Evolution failed."
+        print("Differential Evolution Results")
         print(f"alpha\t{result.x[0]}")
         print(f"beta\t{result.x[1]}")
         print(f"rho\t{result.x[2]}")
-        print(f"nu\t{result.x[3]}")
+        print(f"nu\t{result.x[3]}\n")
+        print(f"time\t{elapsed_time:.2f} s")
 
 
 if __name__ == "__main__":
@@ -368,6 +414,7 @@ if __name__ == "__main__":
     Q = 1
 
     # Define caplet object
+    REFERENCE_DATE = date(2023, 4, 19)
     ACCRUAL_START = 0.5
     ACCRUAL_END = 1.0
     INIT_FWD = 0.05
@@ -375,4 +422,30 @@ if __name__ == "__main__":
     CAPLET = Caplet(ACCRUAL_START, ACCRUAL_END, INIT_FWD, STRIKE, "bwd", "call")
 
     # Initialize SABR Model
-    SABR = SabrModelOIA(ALPHA, BETA, RHO, VOLVOL, Q, CAPLET)
+    SABR = SabrModel(ALPHA, BETA, RHO, VOLVOL, Q, CAPLET)
+
+    # Market Calibration Example
+    MARKET_CAPLETS = []
+
+    DISCOUNT_CURVE = Curve("SOFR_YC_USD_19042023", REFERENCE_DATE, "ACT365")
+
+    for STRIKE_VALUE in np.arange(0.03, 0.07, 0.001):
+        CAPLET.strike = STRIKE_VALUE
+        PRICE = SABR.option_premium()
+        VOL = SABR.black_equiv_vol()
+
+        MARKET_CAPLETS.append(
+            MarketCaplet(
+                ACCRUAL_START,
+                ACCRUAL_END,
+                INIT_FWD,
+                STRIKE_VALUE,
+                "bwd",
+                "call",
+                PRICE,
+                VOL,
+            )
+        )
+
+    SABR.market_calibration(MARKET_CAPLETS)
+    SABR.market_calibration(MARKET_CAPLETS, objective="vol")
