@@ -1,5 +1,4 @@
 from datetime import date
-import numpy as np
 from tools import year_fraction
 
 
@@ -77,13 +76,28 @@ class Caplet:
             raise ValueError(
                 "Invalid day-counter, only ACT/360 and ACT/365 are allowed"
             )
-        self.start = year_fraction(
-            reference_date, self.start_date, self.day_count_convention
+
+        self.in_accrual = self.start_date < self.reference_date
+
+    def start(self):
+        """
+        Determines year fraction between the reference date and the start of the accrual period.
+        """
+        year_frac = year_fraction(
+            self.reference_date, self.start_date, self.day_count_convention
         )
-        self.end = year_fraction(
-            reference_date, self.end_date, self.day_count_convention
+        self.in_accrual = False
+        if year_frac < 0:
+            self.in_accrual = True
+        return year_frac
+
+    def end(self):
+        """
+        Determines year fraction between the reference date and the end of the accrual period.
+        """
+        return year_fraction(
+            self.reference_date, self.end_date, self.day_count_convention
         )
-        self.in_accrual = self.start < 0
 
     def __str__(self) -> str:
         if self.call_put == "call":
@@ -135,11 +149,10 @@ class MarketCaplet(Caplet):
             Returns a string representation of the MarketCaplet object.
     """
 
-    # TODO MarketCaplet should also inherit start_date and end_date from Caplet
     def __init__(
         self,
-        start: float,
-        end: float,
+        start_date: date,
+        end_date: date,
         init_fwd: float,
         strike: float,
         direction: str,
@@ -150,8 +163,8 @@ class MarketCaplet(Caplet):
         day_count_convention="ACT365",
     ):
         super().__init__(
-            start,
-            end,
+            start_date,
+            end_date,
             init_fwd,
             strike,
             direction,
